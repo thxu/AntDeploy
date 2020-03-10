@@ -12,6 +12,11 @@ namespace AntDeployCommand.Utils
     public class CommandHelper
     {
         /// <summary>
+        /// 是否启动完全日志
+        /// </summary>
+        public static bool IgnoreLazy =  false;
+
+        /// <summary>
         /// 执行dotnet
         /// </summary>
         /// <param name="projectPath"></param>
@@ -40,20 +45,80 @@ namespace AntDeployCommand.Utils
             var dotnet = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(OSPlatform.Windows)? "dotnet": System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(OSPlatform.OSX)? "/usr/local/share/dotnet/dotnet": "/usr/share/dotnet/dotnet";
             return RunDotnetExternalExe(dotnet, arguments);
         }
+        private static bool RunCommand(string commandToRun, string workingDirectory = null)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(workingDirectory))
+                {
+                    workingDirectory = Directory.GetDirectoryRoot(Directory.GetCurrentDirectory());
+                }
 
+                var processStartInfo = new ProcessStartInfo()
+                {
+                    FileName = (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cmd" : "bash"),
+                    RedirectStandardOutput = true,
+                    RedirectStandardInput = true,
+                    WorkingDirectory = workingDirectory
+                };
+
+                var process = Process.Start(processStartInfo);
+
+                if (process == null)
+                {
+                    LogHelper.Error("Process should not be null.");
+                    return false;
+                }
+
+                process.StandardInput.WriteLine($"{commandToRun} & exit");
+                process.WaitForExit();
+
+                var output = process.StandardOutput.ReadToEnd();
+                if (process.ExitCode == 0)
+                {
+                    LogHelper.Info("【Command】" + output);
+                }
+                else
+                {
+                    LogHelper.Warn("【Command】" + output);
+                }
+
+                try
+                {
+                    process.Kill();
+                }
+                catch (Exception)
+                {
+                    //ignore
+                }
+                return process.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.Error("【Command】" + ex.Message);
+                return false;
+            }
+
+        }
         /// <summary>
         /// 执行dotnet Command命令
         /// </summary>
         /// <param name="fileName"></param>
+        /// <param name="prefix"></param>
+        /// <param name="workingFolder"></param>
         /// <param name="arguments"></param>
         /// <returns></returns>
-        private static bool RunDotnetExternalExe(string fileName, string arguments)
+        public static bool RunDotnetExternalExe(string fileName, string arguments,string workingFolder = null,string prefix = "【Build】")
         {
+            if (!string.IsNullOrEmpty(workingFolder))
+            {
+                return RunCommand(arguments, workingFolder);
+            }
             Process process = null;
             BuildProgress pr = null;
             try
             {
-                LogHelper.Info("【Build】" + fileName + " " + arguments);
+                LogHelper.Info(prefix + fileName + " " + arguments);
                 if (string.IsNullOrEmpty(arguments))
                 {
                     throw new ArgumentException(nameof(arguments));
@@ -64,7 +129,7 @@ namespace AntDeployCommand.Utils
 
                 process = new Process();
 
-                process.StartInfo.WorkingDirectory = "";
+                process.StartInfo.WorkingDirectory = workingFolder??string.Empty;
                 process.StartInfo.FileName = fileName;
                 process.StartInfo.Arguments = arguments;
                 process.StartInfo.CreateNoWindow = true;
@@ -87,26 +152,26 @@ namespace AntDeployCommand.Utils
                     {
                         if (args.Data.StartsWith(" "))//有这个代表肯定build有出问题
                         {
-                            LogHelper.Info("【Build】" + args.Data);
+                            LogHelper.Info(prefix + args.Data);
                         }
                         if (args.Data.Contains(": warning"))
                         {
                             pr.Log(new BuildEventArgs
                             {
                                 level = LogLevel.Warning,
-                                message = "【Build】" + args.Data
+                                message = prefix + args.Data
                             });
                         }
                         else if (args.Data.Contains(": error"))
                         {
-                            LogHelper.Error("【Build】" + args.Data);
+                            LogHelper.Error(prefix + args.Data);
                         }
                         else
                         {
                             pr.Log(new BuildEventArgs
                             {
                                 level = LogLevel.Info,
-                                message = "【Build】" + args.Data
+                                message = prefix + args.Data
                             });
                         }
                     }
@@ -117,7 +182,7 @@ namespace AntDeployCommand.Utils
                 {
                     if (!string.IsNullOrWhiteSpace(data.Data))
                     {
-                        LogHelper.Error("【Build】" + data.Data);
+                        LogHelper.Error(prefix + data.Data);
                        
                     }
                 };
@@ -137,7 +202,7 @@ namespace AntDeployCommand.Utils
             }
             catch (Exception ex)
             {
-                LogHelper.Error("【Build】" + ex.Message);
+                LogHelper.Error(prefix + ex.Message);
                 return false;
             }
             finally
@@ -226,11 +291,13 @@ namespace AntDeployCommand.Utils
         private readonly IDisposable _subscribe;
         public BuildProgress()
         {
-
-            _subscribe = System.Reactive.Linq.Observable
-                .FromEventPattern<BuildEventArgs>(this, "BuildEvent")
-                .Sample(TimeSpan.FromMilliseconds(100))
-                .Subscribe(arg => { OnBuildEvent(arg.Sender, arg.EventArgs); });
+            if (!CommandHelper.IgnoreLazy)
+            {
+                _subscribe = System.Reactive.Linq.Observable
+                    .FromEventPattern<BuildEventArgs>(this, "BuildEvent")
+                    .Sample(TimeSpan.FromMilliseconds(100))
+                    .Subscribe(arg => { OnBuildEvent(arg.Sender, arg.EventArgs); });
+            }
         }
 
         private void OnBuildEvent(object objSender, BuildEventArgs objEventArgs)
@@ -252,7 +319,7 @@ namespace AntDeployCommand.Utils
 
         public void Log(BuildEventArgs ar)
         {
-            if (BuildEvent == null)
+            if (_subscribe == null || BuildEvent == null)
             {
                 OnBuildEvent(null, ar);
             }

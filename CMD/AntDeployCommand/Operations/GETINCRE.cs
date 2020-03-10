@@ -35,7 +35,7 @@ namespace AntDeployCommand.Operations
 
         public override string Name => "【Git】";
 
-        public override async Task Run()
+        public override async Task<bool> Run()
         {
             //判断是否已经创建了git
             if (Arguments.EnvType.Equals("get"))
@@ -47,64 +47,76 @@ namespace AntDeployCommand.Operations
                 CommitIncrmentFileList();
             }
 
-            await Task.CompletedTask;
+            return await Task.FromResult(true);
         }
 
         /// <summary>
         /// 提交
         /// </summary>
-        private void CommitIncrmentFileList()
+        public bool CommitIncrmentFileList(List<string> fileList = null)
         {
-            var lines = File.ReadAllLines(Arguments.PackageZipPath);
-            if (lines.Length < 1)
+            //拿到gitchange所有的文件列表
+            var lines = fileList ?? File.ReadAllLines(Arguments.PackageZipPath).ToList();
+            if (lines.Count < 1)
             {
                 Log("can not commit,selected fileList count = 0", LogLevel.Error);
-                return;
+                return false;
             }
             //先删除
-            File.Delete(Arguments.PackageZipPath);
-
-            var zipPath = Path.Combine(Arguments.ProjectPath, "package.zip");
-            if (File.Exists(zipPath))
+            if (fileList == null)
             {
-                File.Delete(zipPath);
+                File.Delete(Arguments.PackageZipPath);
+                var zipPath = Path.Combine(Arguments.ProjectPath, "package.zip");
+                if (File.Exists(zipPath))
+                {
+                    File.Delete(zipPath);
+                }
             }
 
+            var re = false;
             using (var gitModel = new GitClient(Arguments.ProjectPath, Log))
             {
                 if (Arguments.IsSelectedDeploy)
                 {
-                    gitModel.SubmitSelectedChanges(lines.ToList(), Arguments.ProjectPath);
+                    re = gitModel.SubmitSelectedChanges(lines, Arguments.ProjectPath);
                 }
                 else
                 {
-                    gitModel.SubmitChanges(lines.Length);
+                    re = gitModel.SubmitChanges(lines.Count);
                 }
             }
+
+            return re;
         }
 
         /// <summary>
         /// 获取git增量
         /// </summary>
-        private void GetIncrmentFileList()
+        public List<string> GetIncrmentFileList(bool notWrite = false)
         {
+            var result = new List<string>();
             using (var gitModel = new GitClient(Arguments.ProjectPath, Log))
             {
                 if (!gitModel.InitSuccess)
                 {
-                    return;
+                    return result;
                 }
 
                 var fileList = gitModel.GetChanges();
                 if (fileList == null || fileList.Count < 1)
                 {
                     Log("Increment package file count: 0" , LogLevel.Warning);
-                    return;
+                    return result;
                 }
 
                 Log("Increment package file count:" + fileList.Count, LogLevel.Info);
 
-                File.WriteAllLines(Arguments.PackageZipPath, fileList.ToArray(), Encoding.UTF8);
+                if (!notWrite)
+                {
+                    File.WriteAllLines(Arguments.PackageZipPath, fileList.ToArray(), Encoding.UTF8);
+                }
+                
+                return fileList;
             }
         }
 

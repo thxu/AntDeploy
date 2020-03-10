@@ -82,6 +82,17 @@ namespace AntDeployWinform.Util
             }
         }
 
+        #region 镜像上传
+        public bool DockerServiceEnableUpload { get; set; }
+        public bool DockerServiceBuildImageOnly { get; set; }
+        public string RepositoryUrl { get; set; }
+        public string RepositoryUserName { get; set; }
+        public string RepositoryUserPwd { get; set; }
+        public string RepositoryNameSpace { get; set; }
+        public string RepositoryImageName { get; set; }
+
+
+        #endregion
 
         public string NetCoreEnvironment { get; set; }
         public string NetCoreENTRYPOINT { get; set; }
@@ -544,7 +555,7 @@ namespace AntDeployWinform.Util
             //复制 覆盖 文件到项目下的 deploy目录
             CopyCpFolder(publishFolder, deploySaveFolder);
             if (CheckCancel()) return;
-
+            var temp = publishFolder;
             if (Increment)
             {
                 var incrementFoler = $"{destinationFolder}increment/";
@@ -556,13 +567,14 @@ namespace AntDeployWinform.Util
 
                 _logger($"Increment deploy success backup to [{incrementFoler}]", NLog.LogLevel.Info);
                 if (CheckCancel()) return;
+                temp = incrementFoler;
             }
 
 
             //执行Docker命令
             _sftpClient.ChangeDirectory(RootFolder);
             ChangeToFolder(deploySaveFolder);
-            DoDockerCommand(deploySaveFolder,false,!isExistDockFile,publishName:"");
+            DoDockerCommand(deploySaveFolder,false,!isExistDockFile,publishName:"",fromFolder: temp);
             
         }
 
@@ -616,7 +628,7 @@ namespace AntDeployWinform.Util
         /// <param name="publishFolder">deploy文件目录</param>
         /// <param name="isrollBack"></param>
         /// <param name="isDefaultDockfile">上传的时候没有DockerFile要创建</param>
-        public void DoDockerCommand(string publishFolder, bool isrollBack = false,bool isDefaultDockfile = false,string publishName = "publish")
+        public void DoDockerCommand(string publishFolder, bool isrollBack = false,bool isDefaultDockfile = false,string publishName = "publish",string fromFolder = null)
         {
             string port = string.Empty;
             string server_port = string.Empty;
@@ -726,6 +738,10 @@ namespace AntDeployWinform.Util
 
                         Volume = volumeInDockerFile;
                     }
+                    else
+                    {
+                        _logger($"Volume in dockerFile is not defined", NLog.LogLevel.Warn);
+                    }
 
                     var serverPostDockerFile = string.Empty;
                     var serverPostDockerFileExist = dockerFileText.Split(new string[] { serverPortProfix }, StringSplitOptions.None);
@@ -757,6 +773,7 @@ namespace AntDeployWinform.Util
                         server_port = needAddPort ? ServerPort : port;
                     }
 
+                    var addV = false;
                     if (!string.IsNullOrEmpty(NetCoreEnvironment) || needAddPort)
                     {
                         var allLines = _sftpClient.ReadAllLines(dockFilePath).ToList();
@@ -804,11 +821,45 @@ namespace AntDeployWinform.Util
                                     {
                                         writer.WriteLine(line);
                                     }
+                                    //发布的时候界面上有填volume 也存在dockerfile 要记录到dockerfile中 不然回滚的时候就没了
+                                    if (string.IsNullOrEmpty(volumeInDockerFile) && !string.IsNullOrEmpty(this.Volume))
+                                    {
+                                        addV = true;
+                                        writer.WriteLine(volumeProfix + this.Volume + "@");
+                                        _logger(volumeProfix + this.Volume + "@", LogLevel.Info);
+                                    }
                                     writer.Flush();
                                 }
                             }
                         }
                     }
+
+                    if (!addV && string.IsNullOrEmpty(volumeInDockerFile) && !string.IsNullOrEmpty(this.Volume))
+                    {
+                        //发布的时候界面上有填volume 也存在dockerfile 要记录到dockerfile中 不然回滚的时候就没了
+                        var allLines = _sftpClient.ReadAllLines(dockFilePath).ToList();
+                        _sshClient.RunCommand($"set -e;cd ~;\\rm -rf \"{dockFilePath}\";");
+                        using (var writer = _sftpClient.CreateText(dockFilePath))
+                        {
+                            foreach (var line in allLines)
+                            {
+                                writer.WriteLine(line);
+                            }
+
+                            writer.WriteLine(volumeProfix + this.Volume + "@");
+                            _logger(volumeProfix + this.Volume + "@", LogLevel.Info);
+                            writer.Flush();
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(fromFolder))
+                    {
+                        //需要将修改过的DockerFile 移动到 发布文件夹的publish 目录下 不然会导致回滚的时候失败
+                        var command = $"\\cp -rf {dockFilePath} {fromFolder}";
+                        _logger($"Update DockerFile 【{command}】", NLog.LogLevel.Info);
+                        _sshClient.RunCommand(command);
+                    }
+
                 }
                 catch (Exception ex)
                 {
@@ -823,6 +874,11 @@ namespace AntDeployWinform.Util
             {
                 _logger($"build image fail", NLog.LogLevel.Error);
                 return;
+            }
+
+            if (this.DockerServiceBuildImageOnly)
+            {
+                goto DockerServiceBuildImageOnlyLEVEL;
             }
 
             var continarName = "d_" + PorjectName;
@@ -883,8 +939,15 @@ namespace AntDeployWinform.Util
                 return;
             }
 
+            //查看是否只打包镜像不允许
+            DockerServiceBuildImageOnlyLEVEL:
+            if (DockerServiceBuildImageOnly)
+            {
+                _logger($"ignore docker run", NLog.LogLevel.Warn);
+            }
             //把旧的image给删除
             r1 = _sshClient.RunCommand("docker images --format '{{.Repository}}:{{.Tag}}:{{.ID}}' | grep '^" + PorjectName + ":'");
+            Tuple<string, string, string> currentImageInfo = null;
             if (r1.ExitStatus == 0 && !string.IsNullOrEmpty(r1.Result))
             {
                 var deleteImageArr = r1.Result.Split('\n');
@@ -893,6 +956,11 @@ namespace AntDeployWinform.Util
                 {
                     if (imageName.StartsWith($"{PorjectName}:{ClientDateTimeFolderName}:"))
                     {
+                        var imageArr2 = imageName.Split(':');
+                        if (imageArr2.Length == 3)
+                        {
+                            currentImageInfo = new Tuple<string, string, string>(imageArr2[0], imageArr2[1], imageArr2[2]);
+                        }
                         //当前版本
                         continue;
                     }
@@ -927,9 +995,46 @@ namespace AntDeployWinform.Util
                 //igore
             }
 
+            //镜像上传
+            if (!isrollBack && currentImageInfo!=null && this.DockerServiceEnableUpload)
+            {
+                //第一步 登录
+                //第二步 重新tag
+                //第三步 推送
+                //第四步 删除
+                //第五步 退出登录
+                //万一已经存在就删除
+                var uploadImageName =$"{this.RepositoryUrl}/{this.RepositoryNameSpace}/{this.RepositoryImageName}:{currentImageInfo.Item2}";
+                _sshClient.RunCommand($"docker rmi {uploadImageName}");
+                var rr11 = _sshClient.CreateCommand($"set -e;docker login -u {this.RepositoryUserName} -p {this.RepositoryUserPwd} {this.RepositoryUrl}; docker tag {currentImageInfo.Item3} {uploadImageName};docker push {uploadImageName}");
+                var result = rr11.BeginExecute();
+                using (var reader = new StreamReader(rr11.OutputStream, Encoding.UTF8, true, 1024, true))
+                {
+                    while (!result.IsCompleted || !reader.EndOfStream)
+                    {
+                        string line = reader.ReadLine();
+                        if (line != null)
+                        {
+                            _logger($"[upload image] - {line}", LogLevel.Warn);
+                        }
+                    }
+                }
+                rr11.EndExecute(result);
+                if (rr11.ExitStatus != 0)
+                {
+                    _logger($"[upload image] - Fail", LogLevel.Error);
+                }
+                else
+                {
+                    _logger($"[upload image] - Success", LogLevel.Info);
+                }
+                _sshClient.RunCommand($"docker rmi {uploadImageName}");
+            }
+
             ClearOldHistroy();
 
         }
+
 
 
         public void ClearOldHistroy()

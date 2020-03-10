@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Threading;
 
 namespace AntDeployAgentWindows.MyApp.Service.Impl
 {
@@ -52,7 +53,11 @@ namespace AntDeployAgentWindows.MyApp.Service.Impl
                 {
                     return "publish file save fail";
                 }
-                Log("agent version ==>" + AntDeployAgentWindows.Version.VERSION);
+#if NETCORE
+                Log("netcore agent version ==>" + AntDeployAgentWindows.Version.VERSION);
+#else
+                Log("netframework agent version ==>" + AntDeployAgentWindows.Version.VERSION);
+#endif
                 Log("upload success ==>" + filePath);
                 //解压
                 try
@@ -113,7 +118,7 @@ namespace AntDeployAgentWindows.MyApp.Service.Impl
                   
 
                     //复制文件到发布目录
-                    CopyHelper.DirectoryCopy(deployFolder, firstDeployFolder, true);
+                    CopyHelper.ProcessXcopy(deployFolder, firstDeployFolder, Log);
 
                     Log($"copy files success from [{deployFolder}] to [{firstDeployFolder}]");
 
@@ -142,6 +147,14 @@ namespace AntDeployAgentWindows.MyApp.Service.Impl
                     }
                     catch (Exception e2)
                     {
+                        Thread.Sleep(5000);
+                        var isStart = WindowServiceHelper.IsStart(_serviceName);
+                        if (isStart)
+                        {
+                            Log($"install windows service success");
+                            Log($"start windows service success");
+                            return string.Empty;
+                        }
                         return $"install windows service fail:" + e2.Message;
                     }
 
